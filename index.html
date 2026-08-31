@@ -284,24 +284,43 @@ function tick(){
 }
 setInterval(tick,1000); tick();
 
+const FETCH_TIMEOUT_MS = 6000;
+
+// Fallbacks only. MLB's API sends CORS headers, so the direct call is tried first.
 const PROXIES = [
-  u => 'https://corsproxy.io/?' + encodeURIComponent(u),
   u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
   u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
+  u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
 ];
 
-async function api(url){
-  const bust = url + (url.includes('?') ? '&' : '?') + '_=' + Date.now();
-  for(const proxy of PROXIES){
-    try{
-      const r = await fetch(proxy(bust), {cache: 'no-store'});
-      if(!r.ok) continue;
-      return await r.json();
-    }catch{ continue; }
+// Every request gets a hard timeout. Without one, a proxy that accepts the
+// connection and never answers hangs forever: fetch neither resolves nor
+// rejects, so the fallback loop below never advances and the spinner sticks.
+async function fetchJSON(target){
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  try{
+    const r = await fetch(target, {cache: 'no-store', signal: ctrl.signal});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
   }
-  const r = await fetch(bust, {cache: 'no-store'});
-  if(!r.ok) throw new Error('HTTP ' + r.status);
-  return await r.json();
+}
+
+async function api(url){
+  // Cache-bust so Safari doesn't serve stale data
+  const bust = url + (url.includes('?') ? '&' : '?') + '_=' + Date.now();
+  // Direct first, then proxies. Each attempt is time-boxed, so a stalled
+  // endpoint costs FETCH_TIMEOUT_MS and moves on instead of blocking.
+  const attempts = [u => u].concat(PROXIES);
+  let lastErr;
+  for(const build of attempts){
+    try{
+      return await fetchJSON(build(bust));
+    }catch(e){ lastErr = e; }
+  }
+  throw lastErr || new Error('All fetch attempts failed');
 }
 
 function todayET(){ return new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'}); }
@@ -739,7 +758,8 @@ function renderGame(feed){
 /* ── STANDINGS ── */
 async function loadStandings(){
   try{
-    const data = await api(BASE + '/standings?leagueId=103&season=2026&standingsTypes=regularSeason&hydrate=team,division');
+    const season = todayET().slice(0,4);
+    const data = await api(BASE + '/standings?leagueId=103&season=' + season + '&standingsTypes=regularSeason&hydrate=team,division');
     const ale = data.records.find(r => r.division?.name?.includes('East') && r.division?.name?.includes('American'));
     if(!ale) return;
 
